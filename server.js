@@ -4,12 +4,56 @@ const fs = require('fs').promises;
 const fss = require('fs');  // sync version for atomic rename
 const path = require('path');
 const axios = require('axios');
+const passport = require('passport');
+const WindowsStrategy = require('passport-windowsauth');
+const session = require('express-session');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const DATA_FILE = path.join(__dirname, 'activities.json');
 const BACKUP_DIR = path.join(__dirname, 'backups');
 const MAX_BACKUPS = 20;  // keep last 20 backups
+
+// Configure Passport with Windows Authentication
+try {
+  passport.use('windowsauth', new WindowsStrategy({
+    integrated: true, // Use integrated Windows authentication
+    getUserNameFromHeader: (req) => {
+      // Extract username from NTLM headers
+      return req.headers['x-iisnode-auth_user'] || req.headers['remote_user'] || 'Unknown';
+    }
+  }, (profile, done) => {
+    // Verify function - profile contains user information
+    console.log('Windows auth profile:', profile);
+    return done(null, profile);
+  }));
+  console.log('Windows authentication strategy registered successfully');
+} catch (error) {
+  console.error('Failed to register Windows authentication strategy:', error);
+  // Fallback: Use system username for development
+  passport.use('windowsauth', {
+    authenticate: function(req, options) {
+      const user = {
+        name: process.env.USERNAME || process.env.USER || 'Unknown User',
+        domain: process.env.USERDOMAIN || 'LOCAL'
+      };
+      console.log('Using fallback authentication with user:', user);
+      return this.success(user);
+    }
+  });
+}
+
+// Debug: Check if strategy is registered
+console.log('Registered strategies:', Object.keys(passport._strategies));
+
+// Serialize user
+passport.serializeUser((user, done) => {
+  done(null, user);
+});
+
+passport.deserializeUser((user, done) => {
+  done(null, user);
+});
 
 // Ensure backup directory exists (synchronously for startup)
 function ensureBackupDirSync() {
@@ -90,11 +134,31 @@ async function writeData(data) {
 
 // Middleware
 app.use(cors());
+app.use(session({
+  secret: 'weekly-planner-secret-key', // Change this to a secure secret in production
+  resave: false,
+  saveUninitialized: false,
+  cookie: { secure: false } // Set to true if using HTTPS
+}));
+app.use(passport.initialize());
+app.use(passport.session());
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
-// Initialize backup directory at startup
-ensureBackupDirSync();
+// Authentication middleware
+function requireAuth(req, res, next) {
+  passport.authenticate('windowsauth', { session: false }, (err, user, info) => {
+    if (err) {
+      console.error('Auth error:', err);
+      return res.status(500).json({ error: 'Authentication error' });
+    }
+    if (!user) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+    req.user = user;
+    next();
+  })(req, res, next);
+}
 
 // Helper to read data
 async function readData() {
@@ -139,7 +203,11 @@ async function readData() {
 }
 
 // Routes
-app.get('/api/activities', async (req, res) => {
+app.get('/api/user', requireAuth, (req, res) => {
+  res.json({ user: req.user });
+});
+
+app.get('/api/activities', requireAuth, async (req, res) => {
   try {
     const data = await readData();
     res.json(data);
@@ -149,7 +217,7 @@ app.get('/api/activities', async (req, res) => {
 });
 
 
-app.post('/api/activities', async (req, res) => {
+app.post('/api/activities', requireAuth, async (req, res) => {
   const { date, text, bg, fg } = req.body;
   if (!date || !text || !bg || !fg) {
     return res.status(400).json({ error: 'Missing required fields' });
@@ -171,7 +239,7 @@ app.post('/api/activities', async (req, res) => {
   }
 });
 
-app.put('/api/activities/:id', async (req, res) => {
+app.put('/api/activities/:id', requireAuth, async (req, res) => {
   const { id } = req.params;
   const { text, bg, fg } = req.body;
   if (!text || !bg || !fg) {
@@ -208,7 +276,7 @@ app.put('/api/activities/:id', async (req, res) => {
   }
 });
 
-app.put('/api/activities/:id/move', async (req, res) => {
+app.put('/api/activities/:id/move', requireAuth, async (req, res) => {
   const { id } = req.params;
   const { date } = req.body;
   if (!date) {
@@ -243,7 +311,7 @@ app.put('/api/activities/:id/move', async (req, res) => {
   }
 });
 
-app.delete('/api/activities/:id', async (req, res) => {
+app.delete('/api/activities/:id', requireAuth, async (req, res) => {
   const { id } = req.params;
   try {
     const data = await readData();
@@ -272,7 +340,7 @@ app.delete('/api/activities/:id', async (req, res) => {
 });
 
 // Backup and recovery endpoints
-app.get('/api/backups', async (req, res) => {
+app.get('/api/backups', requireAuth, async (req, res) => {
   try {
     const files = await fs.readdir(BACKUP_DIR);
     const backups = files
@@ -288,7 +356,7 @@ app.get('/api/backups', async (req, res) => {
   }
 });
 
-app.post('/api/backups/restore/:timestamp', async (req, res) => {
+app.post('/api/backups/restore/:timestamp', requireAuth, async (req, res) => {
   try {
     const { timestamp } = req.params;
     const backupFile = path.join(BACKUP_DIR, `activities-${timestamp}.json`);
@@ -325,7 +393,7 @@ app.post('/api/backups/restore/:timestamp', async (req, res) => {
 });
 
 // Chat endpoint - process questions about activities using LLM
-app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', requireAuth, async (req, res) => {
   try {
     const { question } = req.body;
     if (!question) {
@@ -333,7 +401,7 @@ app.post('/api/chat', async (req, res) => {
     }
     
     const data = await readData();
-    const answer = await generateChatResponse(question, data);
+    const answer = await generateChatResponse(question, data, req.user);
     res.json({ answer });
   } catch (error) {
     console.error('Chat error:', error);
@@ -342,7 +410,7 @@ app.post('/api/chat', async (req, res) => {
 });
 
 // Helper function to generate chat responses using Ollama LLM
-async function generateChatResponse(question, data) {
+async function generateChatResponse(question, data, user) {
   try {
     // Prepare context about activities
     const activitiesSummary = Object.entries(data.activities)
@@ -352,8 +420,11 @@ async function generateChatResponse(question, data) {
       .join('\n');
     
     const today = new Date().toISOString().slice(0, 10);
+    const userName = user && user.name ? user.name : 'משתמש';
     
-    const prompt = `You are a helpful assistant for a weekly planner app. The user has activities scheduled as follows:
+    const prompt = `You are a helpful assistant for a weekly planner app. The user is ${userName}.
+
+The user has activities scheduled as follows:
 
 ${activitiesSummary || 'No activities scheduled yet.'}
 
@@ -379,13 +450,14 @@ User question: ${question}`;
     // Fallback to simple responses if LLM is not available
     const q = question.toLowerCase();
     const today = new Date().toISOString().slice(0, 10);
+    const userName = user && user.name ? user.name : 'משתמש';
     
     if (q.includes('היום') || q.includes('הלום') || q.includes('today')) {
       const todayActivities = data.activities[today] || [];
       if (todayActivities.length === 0) {
-        return 'אין לך פעילויות היום. יום שקט!';
+        return `${userName}, אין לך פעילויות היום. יום שקט!`;
       }
-      return `היום יש לך ${todayActivities.length} פעילות:\n${todayActivities.map((a, i) => `${i + 1}. ${a.text}`).join('\n')}`;
+      return `${userName}, היום יש לך ${todayActivities.length} פעילות:\n${todayActivities.map((a, i) => `${i + 1}. ${a.text}`).join('\n')}`;
     }
     
     if (q.includes('כמה') || q.includes('count')) {
@@ -393,18 +465,18 @@ User question: ${question}`;
       for (const date in data.activities) {
         total += data.activities[date].length;
       }
-      return `יש לך בסך הכל ${total} פעילויות.`;
+      return `${userName}, יש לך בסך הכל ${total} פעילויות.`;
     }
     
     if (q.includes('מתי') || q.includes('when') || q.includes('פעילויות')) {
       const dates = Object.keys(data.activities).sort();
       if (dates.length === 0) {
-        return 'אין לך כל פעילויות מתוכננות.';
+        return `${userName}, אין לך כל פעילויות מתוכננות.`;
       }
-      return `יש לך פעילויות בימים אלה:\n${dates.join('\n')}`;
+      return `${userName}, יש לך פעילויות בימים אלה:\n${dates.join('\n')}`;
     }
     
-    return 'סליחה, אני לא יכול להתחבר לשרת ה-LLM. אנא וודא ש-Ollama פועל עם מודל "mistral" מותקן. שאל שאלות על הפעילויות שלך!';
+    return `סליחה ${userName}, אני לא יכול להתחבר לשרת ה-LLM. אנא וודא ש-Ollama פועל עם מודל "mistral" מותקן. שאל שאלות על הפעילויות שלך!`;
   }
 }
 

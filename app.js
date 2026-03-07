@@ -17,10 +17,12 @@ const DEFAULT_COLOR = COLORS[0];
 // data shape: { "YYYY-MM-DD": [ { id, text, bg, fg }, ... ] }
 let data = {};
 let changes = [];
+let user = null;  // user info from server
 let activeFormInfo = null;  // { formEl }
 let dragState = null;       // { actId, fromKey } during a drag operation
 let isEditing = false;      // flag to prevent refresh during editing
 let weekOffset = 0;        // 0 = default view, positive = weeks ahead, negative = weeks back
+let chatWelcomeShown = false;  // track if welcome message was shown
 
 // ── Utility helpers ───────────────────────────────────────────────────────
 function uid() {
@@ -77,6 +79,21 @@ function showToast(msg, duration = 2600) {
 }
 
 // ── Data loading ─────────────────────────────────────────────────────────────
+async function loadUser() {
+  try {
+    const response = await fetch('/api/user');
+    if (response.ok) {
+      const resp = await response.json();
+      user = resp.user;
+      console.log('User loaded:', user);
+    } else {
+      console.error('Failed to load user info');
+    }
+  } catch (error) {
+    console.error('Failed to load user from server', error);
+  }
+}
+
 async function loadData() {
   try {
     const response = await fetch('/api/activities');
@@ -494,6 +511,7 @@ async function sendChatMessage() {
 
 // ── App init ──────────────────────────────────────────────────────────────
 async function init() {
+  await loadUser();
   await loadData();
 
   document.addEventListener('click', () => closeForm());
@@ -545,8 +563,16 @@ async function init() {
 
   if (chatToggle && chatContainer) {
     chatToggle.addEventListener('click', () => {
+      const wasMinimized = chatContainer.classList.contains('minimized');
       chatContainer.classList.toggle('minimized');
       chatToggle.textContent = chatContainer.classList.contains('minimized') ? '+' : '−';
+      
+      // Show welcome message when opening chat for the first time
+      if (wasMinimized && !chatWelcomeShown && user) {
+        const userName = user.name || 'משתמש';
+        addChatMessage(`שלום ${userName}! אני כאן לעזור לך עם התכנון השבועי שלך. שאל אותי כל שאלה על הפעילויות שלך.`, false);
+        chatWelcomeShown = true;
+      }
     });
   }
 }
