@@ -447,6 +447,51 @@ async function moveActivity(fromKey, actId, toKey) {
   }
 }
 
+// ── Chat functionality ────────────────────────────────────────────────────
+function addChatMessage(text, isUser) {
+  const messagesDiv = document.getElementById('chatMessages');
+  const msgDiv = document.createElement('div');
+  msgDiv.className = `chat-message ${isUser ? 'user' : 'bot'}`;
+  msgDiv.innerHTML = `<div class="msg">${escapeHtml(text)}</div>`;
+  messagesDiv.appendChild(msgDiv);
+  messagesDiv.scrollTop = messagesDiv.scrollHeight;
+}
+
+function escapeHtml(text) {
+  const map = {
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#039;'
+  };
+  return text.replace(/[&<>"']/g, m => map[m]);
+}
+
+async function sendChatMessage() {
+  const input = document.getElementById('chatInput');
+  const message = input.value.trim();
+  if (!message) return;
+  
+  // Add user message to chat
+  addChatMessage(message, true);
+  input.value = '';
+  
+  try {
+    const response = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: message })
+    });
+    
+    const result = await response.json();
+    addChatMessage(result.answer, false);
+  } catch (error) {
+    addChatMessage('סליחה, לא יכלתי לעבד את השאלה. נסה שוב.', false);
+    console.error('Chat error:', error);
+  }
+}
+
 // ── App init ──────────────────────────────────────────────────────────────
 async function init() {
   await loadData();
@@ -480,6 +525,29 @@ async function init() {
         e.preventDefault();
         if (e.deltaY > 0) nextWeek(); else prevWeek();
     }, { passive: false });
+  }
+
+  // Chat event listeners
+  const chatSendBtn = document.getElementById('chatSend');
+  const chatInput = document.getElementById('chatInput');
+  const chatToggle = document.getElementById('chatToggle');
+  const chatContainer = document.querySelector('.chat-container');
+
+  if (chatSendBtn) {
+    chatSendBtn.addEventListener('click', sendChatMessage);
+  }
+  
+  if (chatInput) {
+    chatInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') sendChatMessage();
+    });
+  }
+
+  if (chatToggle && chatContainer) {
+    chatToggle.addEventListener('click', () => {
+      chatContainer.classList.toggle('minimized');
+      chatToggle.textContent = chatContainer.classList.contains('minimized') ? '+' : '−';
+    });
   }
 }
 

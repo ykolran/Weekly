@@ -3,6 +3,7 @@ const cors = require('cors');
 const fs = require('fs').promises;
 const fss = require('fs');  // sync version for atomic rename
 const path = require('path');
+const axios = require('axios');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -322,6 +323,90 @@ app.post('/api/backups/restore/:timestamp', async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+// Chat endpoint - process questions about activities using LLM
+app.post('/api/chat', async (req, res) => {
+  try {
+    const { question } = req.body;
+    if (!question) {
+      return res.status(400).json({ error: 'Missing question' });
+    }
+    
+    const data = await readData();
+    const answer = await generateChatResponse(question, data);
+    res.json({ answer });
+  } catch (error) {
+    console.error('Chat error:', error);
+    res.status(500).json({ error: 'Failed to process question' });
+  }
+});
+
+// Helper function to generate chat responses using Ollama LLM
+async function generateChatResponse(question, data) {
+  try {
+    // Prepare context about activities
+    const activitiesSummary = Object.entries(data.activities)
+      .map(([date, activities]) => 
+        `${date}: ${activities.map(a => a.text).join(', ')}`
+      )
+      .join('\n');
+    
+    const today = new Date().toISOString().slice(0, 10);
+    
+    const prompt = `You are a helpful assistant for a weekly planner app. The user has activities scheduled as follows:
+
+${activitiesSummary || 'No activities scheduled yet.'}
+
+Today is ${today}.
+
+Please answer the user's question in Hebrew, being helpful and concise. If the question is about activities, use the information above. If it's a general question, provide a helpful response.
+
+User question: ${question}`;
+
+    // Call Ollama API
+    const response = await axios.post('http://localhost:1234/v1/chat/completions', {
+      model: 'mistral', // You can change this to any model you have installed in Ollama
+      messages: [{ role: 'user', content: prompt }],
+      stream: false
+    }, {
+      timeout: 100000 // 10 second timeout
+    });
+
+    return response.data.choices[0].message.content.trim();
+  } catch (error) {
+    console.error('LLM API error:', error.message);
+    
+    // Fallback to simple responses if LLM is not available
+    const q = question.toLowerCase();
+    const today = new Date().toISOString().slice(0, 10);
+    
+    if (q.includes('היום') || q.includes('הלום') || q.includes('today')) {
+      const todayActivities = data.activities[today] || [];
+      if (todayActivities.length === 0) {
+        return 'אין לך פעילויות היום. יום שקט!';
+      }
+      return `היום יש לך ${todayActivities.length} פעילות:\n${todayActivities.map((a, i) => `${i + 1}. ${a.text}`).join('\n')}`;
+    }
+    
+    if (q.includes('כמה') || q.includes('count')) {
+      let total = 0;
+      for (const date in data.activities) {
+        total += data.activities[date].length;
+      }
+      return `יש לך בסך הכל ${total} פעילויות.`;
+    }
+    
+    if (q.includes('מתי') || q.includes('when') || q.includes('פעילויות')) {
+      const dates = Object.keys(data.activities).sort();
+      if (dates.length === 0) {
+        return 'אין לך כל פעילויות מתוכננות.';
+      }
+      return `יש לך פעילויות בימים אלה:\n${dates.join('\n')}`;
+    }
+    
+    return 'סליחה, אני לא יכול להתחבר לשרת ה-LLM. אנא וודא ש-Ollama פועל עם מודל "mistral" מותקן. שאל שאלות על הפעילויות שלך!';
+  }
+}
 
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
