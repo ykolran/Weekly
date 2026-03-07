@@ -1,0 +1,328 @@
+const express = require('express');
+const cors = require('cors');
+const fs = require('fs').promises;
+const fss = require('fs');  // sync version for atomic rename
+const path = require('path');
+
+const app = express();
+const PORT = process.env.PORT || 3000;
+const DATA_FILE = path.join(__dirname, 'activities.json');
+const BACKUP_DIR = path.join(__dirname, 'backups');
+const MAX_BACKUPS = 20;  // keep last 20 backups
+
+// Ensure backup directory exists (synchronously for startup)
+function ensureBackupDirSync() {
+  try {
+    if (!fss.existsSync(BACKUP_DIR)) {
+      fss.mkdirSync(BACKUP_DIR, { recursive: true });
+      console.log('Created backup directory:', BACKUP_DIR);
+    }
+  } catch (error) {
+    console.error('Failed to create backup directory:', error);
+  }
+}
+
+// Validate JSON structure
+function validateData(obj) {
+  if (!obj || typeof obj !== 'object') return false;
+  if (!('activities' in obj) || !('changes' in obj)) return false;
+  if (typeof obj.activities !== 'object' || !Array.isArray(obj.changes)) return false;
+  return true;
+}
+
+// Create timestamped backup
+async function createBackup() {
+  try {
+    // Ensure backup directory exists
+    ensureBackupDirSync();
+    
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5);
+    const backupFile = path.join(BACKUP_DIR, `activities-${timestamp}.json`);
+    const currentData = await fs.readFile(DATA_FILE, 'utf8');
+    await fs.writeFile(backupFile, currentData);
+    console.log('Backup created:', backupFile);
+    
+    // Clean up old backups (keep only MAX_BACKUPS)
+    const files = await fs.readdir(BACKUP_DIR);
+    const backupFiles = files
+      .filter(f => f.startsWith('activities-') && f.endsWith('.json'))
+      .sort()
+      .reverse();
+    
+    for (let i = MAX_BACKUPS; i < backupFiles.length; i++) {
+      await fs.unlink(path.join(BACKUP_DIR, backupFiles[i]));
+      console.log('Deleted old backup:', backupFiles[i]);
+    }
+  } catch (error) {
+    console.error('Backup creation failed:', error);
+  }
+}
+
+// Atomic write with backup
+async function writeData(data) {
+  if (!validateData(data)) {
+    throw new Error('Invalid data structure');
+  }
+  
+  try {
+    // Ensure backup directory exists
+    ensureBackupDirSync();
+    
+    // Create backup before writing
+    if (fss.existsSync(DATA_FILE)) {
+      await createBackup();
+    }
+    
+    const tempFile = DATA_FILE + '.tmp';
+    const jsonStr = JSON.stringify(data, null, 2);
+    
+    // Write to temporary file
+    await fs.writeFile(tempFile, jsonStr, 'utf8');
+    
+    // Atomic rename (overwrites atomically on both Linux and Windows)
+    fss.renameSync(tempFile, DATA_FILE);
+  } catch (error) {
+    console.error('Write failed:', error);
+    throw error;
+  }
+}
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.static(path.join(__dirname)));
+
+// Initialize backup directory at startup
+ensureBackupDirSync();
+
+// Helper to read data
+async function readData() {
+  try {
+    const data = await fs.readFile(DATA_FILE, 'utf8');
+    const obj = JSON.parse(data);
+    
+    // Validate structure
+    if (!validateData(obj)) {
+      throw new Error('Invalid data structure');
+    }
+    
+    // Ensure structure
+    if (!obj.activities) obj.activities = {};
+    if (!obj.changes) obj.changes = [];
+    return obj;
+  } catch (error) {
+    console.error('Error reading main data file:', error.message);
+    
+    // Try to recover from most recent backup
+    try {
+      const files = await fs.readdir(BACKUP_DIR);
+      const backupFiles = files
+        .filter(f => f.startsWith('activities-') && f.endsWith('.json'))
+        .sort()
+        .reverse();
+      
+      if (backupFiles.length > 0) {
+        const latestBackup = backupFiles[0];
+        console.log(`Recovering from backup: ${latestBackup}`);
+        const backupData = await fs.readFile(path.join(BACKUP_DIR, latestBackup), 'utf8');
+        return JSON.parse(backupData);
+      }
+    } catch (backupError) {
+      console.error('Failed to recover from backup:', backupError.message);
+    }
+    
+    // Return empty structure as last resort
+    console.log('Returning empty data structure');
+    return { activities: {}, changes: [] };
+  }
+}
+
+// Routes
+app.get('/api/activities', async (req, res) => {
+  try {
+    const data = await readData();
+    res.json(data);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+
+app.post('/api/activities', async (req, res) => {
+  const { date, text, bg, fg } = req.body;
+  if (!date || !text || !bg || !fg) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  try {
+    const data = await readData();
+    if (!data.activities[date]) data.activities[date] = [];
+    data.activities[date].push({ id, text, bg, fg });
+    // log change (date only)
+    data.changes.unshift({
+      date: new Date().toISOString().slice(0,10),
+      desc: `Added "${text}"`
+    });
+    await writeData(data);
+    res.json({ id });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/activities/:id', async (req, res) => {
+  const { id } = req.params;
+  const { text, bg, fg } = req.body;
+  if (!text || !bg || !fg) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+  try {
+    const data = await readData();
+    let found = false;
+    for (const date in data.activities) {
+      const acts = data.activities[date];
+      const act = acts.find(a => a.id === id);
+      if (act) {
+        const prevText = act.text;
+        const textChanged = prevText !== text;
+        act.text = text;
+        act.bg = bg;
+        act.fg = fg;
+        found = true;
+        // log only if text changed
+        if (textChanged) {
+          data.changes.unshift({
+            date: new Date().toISOString().slice(0,10),
+            desc: `פעילות "${prevText}" שונתה ל-"${text}"`
+          });
+        }
+        break;
+      }
+    }
+    if (!found) return res.status(404).json({ error: 'Activity not found' });
+    await writeData(data);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.put('/api/activities/:id/move', async (req, res) => {
+  const { id } = req.params;
+  const { date } = req.body;
+  if (!date) {
+    return res.status(400).json({ error: 'Missing date' });
+  }
+  try {
+    const data = await readData();
+    let act;
+    let oldDate;
+    for (const d in data.activities) {
+      const acts = data.activities[d];
+      const idx = acts.findIndex(a => a.id === id);
+      if (idx !== -1) {
+        act = acts.splice(idx, 1)[0];
+        oldDate = d;
+        if (acts.length === 0) delete data.activities[d];
+        break;
+      }
+    }
+    if (!act) return res.status(404).json({ error: 'Activity not found' });
+    if (!data.activities[date]) data.activities[date] = [];
+    data.activities[date].push(act);
+    // log change
+    data.changes.unshift({
+      date: new Date().toISOString().slice(0,10),
+      desc: `הפעילות "${act.text}" הועברה מ-${oldDate} ל-${date}`
+    });
+    await writeData(data);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete('/api/activities/:id', async (req, res) => {
+  const { id } = req.params;
+  try {
+    const data = await readData();
+    let found = false;
+    for (const date in data.activities) {
+      const acts = data.activities[date];
+      const idx = acts.findIndex(a => a.id === id);
+      if (idx !== -1) {
+        const [removed] = acts.splice(idx, 1);
+        if (acts.length === 0) delete data.activities[date];
+        found = true;
+        // log deletion
+        data.changes.unshift({
+          date: new Date().toISOString().slice(0,10),
+          desc: `Deleted "${removed.text}"`
+        });
+        break;
+      }
+    }
+    if (!found) return res.status(404).json({ error: 'Activity not found' });
+    await writeData(data);
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Backup and recovery endpoints
+app.get('/api/backups', async (req, res) => {
+  try {
+    const files = await fs.readdir(BACKUP_DIR);
+    const backups = files
+      .filter(f => f.startsWith('activities-') && f.endsWith('.json'))
+      .map(f => ({
+        timestamp: f.replace('activities-', '').replace('.json', ''),
+        filename: f
+      }))
+      .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+    res.json(backups);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/backups/restore/:timestamp', async (req, res) => {
+  try {
+    const { timestamp } = req.params;
+    const backupFile = path.join(BACKUP_DIR, `activities-${timestamp}.json`);
+    
+    // Verify backup exists
+    const stat = await fs.stat(backupFile);
+    if (!stat.isFile()) {
+      return res.status(404).json({ error: 'Backup not found' });
+    }
+    
+    // Read and validate backup
+    const backupContent = await fs.readFile(backupFile, 'utf8');
+    const backupData = JSON.parse(backupContent);
+    
+    if (!validateData(backupData)) {
+      return res.status(400).json({ error: 'Backup data is corrupted' });
+    }
+    
+    // Create backup of current state before restoring
+    if (fss.existsSync(DATA_FILE)) {
+      await createBackup();
+    }
+    
+    // Restore the backup
+    await writeData(backupData);
+    
+    res.json({ 
+      success: true, 
+      message: `Data restored from ${timestamp}` 
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
+});

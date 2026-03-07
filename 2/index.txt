@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>מתכנן שבועי</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header>
+  <h1>מתכנן שבועי</h1>
+  <button class="hbtn" id="refreshBtn" style="display:none" title="טען מחדש נתונים מהקובץ המשותף">רענן</button>
+</header>
+
+<div class="status-bar">
+  <span id="statusText">מחבר לקובץ המשותף...</span>
+  <span id="saveIndicator"></span>
+</div>
+
+<div class="cal-wrap">
+  <table class="calendar">
+    <thead>
+      <tr>
+        <th>שבוע</th>
+        <th>ראשון</th>
+        <th>שני</th>
+        <th>שלישי</th>
+        <th>רביעי</th>
+        <th>חמישי</th>
+        <th>שישי</th>
+        <th>שבת</th>
+      </tr>
+    </thead>
+    <tbody id="calBody"></tbody>
+  </table>
+</div>
+
+<div class="help-bar">
+  לחץ <strong>+ הוסף</strong> בכל יום להוספת פעילות &nbsp;|&nbsp; רחף על פעילות לעריכה או מחיקה &nbsp;|&nbsp; <strong>גרור</strong> פעילות להזזה ליום אחר
+</div>
+
+<div id="toast"></div>
+
+<!-- Setup overlay — shown on first visit or when file permission must be re-granted -->
+<div id="setupOverlay">
+  <div class="setup-box">
+    <h2>מתכנן שבועי</h2>
+    <p id="setupMsg"></p>
+    <button id="setupBtn"></button>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

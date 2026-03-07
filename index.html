@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>מתכנן שבועי</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header>
+  <div class="header-left">
+    <button id="prevWeek" class="week-nav">▶</button>
+  </div>
+  <h1>מתכנן שבועי</h1>
+  <div class="header-right">
+    <button id="nextWeek" class="week-nav">◀</button>
+  </div>
+</header>
+
+<div class="status-bar">
+  <span id="statusText">מחבר לשרת...</span>
+</div>
+
+<div id="changeLog" class="change-log"></div>
+
+<div class="cal-wrap">
+  <table class="calendar">
+    <thead>
+      <tr>
+        <th>שבוע</th>
+        <th>ראשון</th>
+        <th>שני</th>
+        <th>שלישי</th>
+        <th>רביעי</th>
+        <th>חמישי</th>
+        <th>שישי</th>
+        <th>שבת</th>
+      </tr>
+    </thead>
+    <tbody id="calBody"></tbody>
+  </table>
+</div>
+
+<div class="help-bar">
+  לחץ <strong>+ הוסף</strong> בכל יום להוספת פעילות &nbsp;|&nbsp; רחף על פעילות לעריכה או מחיקה &nbsp;|&nbsp; <strong>גרור</strong> פעילות להזזה ליום אחר
+</div>
+
+<div id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
