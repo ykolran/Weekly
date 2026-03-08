@@ -19,8 +19,8 @@ try {
   passport.use('windowsauth', new WindowsStrategy({
     integrated: true, // Use integrated Windows authentication
     getUserNameFromHeader: (req) => {
-      // Extract username from NTLM headers
-      return req.headers['x-iisnode-auth_user'] || req.headers['remote_user'] || 'Unknown';
+      // Extract username from NTLM headers or fallback to env
+      return req.headers['x-iisnode-auth_user'] || req.headers['remote_user'] || process.env.USERNAME || process.env.USER || 'Unknown';
     }
   }, (profile, done) => {
     // Verify function - profile contains user information
