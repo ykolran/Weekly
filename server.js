@@ -230,7 +230,7 @@ app.post('/api/activities', requireAuth, async (req, res) => {
     // log change (date only)
     data.changes.unshift({
       date: new Date().toISOString().slice(0,10),
-      desc: `Added "${text}"`
+      desc: `הפעילות "${text}" נוספה`
     });
     await writeData(data);
     res.json({ id });
