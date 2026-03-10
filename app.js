@@ -548,7 +548,6 @@ async function init() {
   // Chat event listeners
   const chatSendBtn = document.getElementById('chatSend');
   const chatInput = document.getElementById('chatInput');
-  const chatToggle = document.getElementById('chatToggle');
   const chatContainer = document.querySelector('.chat-container');
 
   if (chatSendBtn) {
@@ -561,19 +560,11 @@ async function init() {
     });
   }
 
-  if (chatToggle && chatContainer) {
-    chatToggle.addEventListener('click', () => {
-      const wasMinimized = chatContainer.classList.contains('minimized');
-      chatContainer.classList.toggle('minimized');
-      chatToggle.textContent = chatContainer.classList.contains('minimized') ? '+' : '−';
-      
-      // Show welcome message when opening chat for the first time
-      if (wasMinimized && !chatWelcomeShown && user) {
-        const userName = user.name || 'משתמש';
-        addChatMessage(`שלום ${userName}! אני כאן לעזור לך עם התכנון השבועי שלך. שאל אותי כל שאלה על הפעילויות שלך.`, false);
-        chatWelcomeShown = true;
-      }
-    });
+  // Show welcome message on init since chat is always open
+  if (!chatWelcomeShown && user) {
+    const userName = user.name || 'משתמש';
+    addChatMessage(`שלום ${userName}! אני כאן לעזור לך עם התכנון השבועי שלך. שאל אותי כל שאלה על הפעילויות שלך.`, false);
+    chatWelcomeShown = true;
   }
 }
 
