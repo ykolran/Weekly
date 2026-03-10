@@ -4,7 +4,7 @@ const fs = require('fs').promises;
 const fss = require('fs');  // sync version for atomic rename
 const path = require('path');
 const axios = require('axios');
-const nodesppi = require('passport');
+const NodeSSPI = require('node-sspi');
 const session = require('express-session');
 
 const app = express();
@@ -13,29 +13,17 @@ const DATA_FILE = path.join(__dirname, 'activities.json');
 const BACKUP_DIR = path.join(__dirname, 'backups');
 const MAX_BACKUPS = 20;  // keep last 20 backups
 
-// Configure nodesppi with fallback authentication
-nodesppi.use('windowsauth', {
-  authenticate: function(req, options) {
-    const user = {
-      name: process.env.USERNAME || process.env.USER || 'Unknown User',
-      domain: process.env.USERDOMAIN || 'LOCAL'
-    };
-    console.log('Using fallback authentication with user:', user);
-    return this.success(user);
-  }
-});
+// Control whether to perform real Windows authentication.  Set USE_SSPI=false
+// in your environment when running locally or during development to bypass the
+// NTLM/Negotiate handshake and fall back to the simple environment-based user
+// that the previous version of this app used.
+const USE_SSPI = process.env.USE_SSPI !== 'false';
 
-// Debug: Check if strategy is registered
-console.log('Registered strategies:', Object.keys(nodesppi._strategies));
 
-// Serialize user
-nodesppi.serializeUser((user, done) => {
-  done(null, user);
-});
+// Authentication is performed with node-sspi (Windows Integrated
+// Authentication).  A simple environment-based fallback is available for
+// scenarios where SSPI is undesirable (e.g. local development).
 
-nodesppi.deserializeUser((user, done) => {
-  done(null, user);
-});
 
 // Ensure backup directory exists (synchronously for startup)
 function ensureBackupDirSync() {
@@ -122,25 +110,67 @@ app.use(session({
   saveUninitialized: false,
   cookie: { secure: false } // Set to true if using HTTPS
 }));
-app.use(nodesppi.initialize());
-app.use(nodesppi.session());
+// we still keep express-session for any other stateful needs, but authentication
+// does not rely on an external auth library.
 app.use(express.json());
 app.use(express.static(path.join(__dirname)));
 
-// Authentication middleware
+// Authentication middleware using node-sspi.  It attaches the Windows user
+// name to `req.user` and falls back to environment variables if SSPI doesn't
+// provide a user (e.g. running locally or on non-Windows platforms).
 function requireAuth(req, res, next) {
-  nodesppi.authenticate('windowsauth', { session: false }, (err, user, info) => {
+  // if SSPI is disabled we simply use the environment-based fallback user and
+  // never trigger the NTLM challenge.  This mirrors the behavior of the old
+  // previous version always returned the environment user regardless of SSPI.
+  if (!USE_SSPI) {
+    const userName = process.env.USERNAME || process.env.USER || 'Unknown User';
+    const domain = process.env.USERDOMAIN || 'LOCAL';
+    console.log('Using fallback authentication (SSPI disabled) with user:', { name: userName, domain });
+    req.user = { name: userName, domain };
+    return next();
+  }
+
+  const nodeSSPI = new NodeSSPI({ retrieveGroups: true });
+  nodeSSPI.authenticate(req, res, (err) => {
     if (err) {
       console.error('Auth error:', err);
-      return res.status(500).json({ error: 'Authentication error' });
+      if (!res.finished) {
+        return res.status(500).json({ error: 'Authentication error' });
+      }
+      return; // response already sent
     }
-    if (!user) {
-      return res.status(401).json({ error: 'Authentication required' });
+
+    if (res.finished) {
+      // node-sspi already replied (e.g. with 401/redirect); do not continue
+      return;
     }
+
+    // node-sspi sets the Windows account on req.connection.user.  It usually
+    // comes in the form "DOMAIN\\username".
+    let rawUser = req.connection && req.connection.user;
+    let user;
+
+    if (rawUser) {
+      if (rawUser.includes('\\')) {
+        const [domain, name] = rawUser.split('\\');
+        user = { name, domain };
+      } else {
+        user = { name: rawUser };
+      }
+    } else {
+      // fallback to environment if SSPI unexpectedly produced no user (this
+      // path is rarely reached when USE_SSPI=true).
+      const userName = process.env.USERNAME || process.env.USER || 'Unknown User';
+      const domain = process.env.USERDOMAIN || 'LOCAL';
+      console.log('Using fallback authentication with user:', { name: userName, domain });
+      user = { name: userName, domain };
+    }
+
     req.user = user;
     next();
-  })(req, res, next);
+  });
 }
+
 
 // Helper to read data
 async function readData() {
