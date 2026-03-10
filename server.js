@@ -13,17 +13,34 @@ const DATA_FILE = path.join(__dirname, 'activities.json');
 const BACKUP_DIR = path.join(__dirname, 'backups');
 const MAX_BACKUPS = 20;  // keep last 20 backups
 
-// Configure nodesppi with fallback authentication
-nodesppi.use('windowsauth', {
-  authenticate: function(req, options) {
-    const user = {
-      name: process.env.USERNAME || process.env.USER || 'Unknown User',
-      domain: process.env.USERDOMAIN || 'LOCAL'
-    };
-    console.log('Using fallback authentication with user:', user);
-    return this.success(user);
-  }
-});
+// Configure Passport with Windows Authentication
+try {
+  passport.use('windowsauth', new WindowsStrategy({
+    integrated: true, // Use integrated Windows authentication
+    getUserNameFromHeader: (req) => {
+      // Extract username from NTLM headers
+      return req.headers['x-iisnode-auth_user'] || req.headers['remote_user'] || 'Unknown';
+    }
+  }, (profile, done) => {
+    // Verify function - profile contains user information
+    console.log('Windows auth profile:', profile);
+    return done(null, profile);
+  }));
+  console.log('Windows authentication strategy registered successfully');
+} catch (error) {
+  console.error('Failed to register Windows authentication strategy:', error);
+  // Fallback: Use system username for development
+  passport.use('windowsauth', {
+    authenticate: function(req, options) {
+      const user = {
+        name: process.env.USERNAME || process.env.USER || 'Unknown User',
+        domain: process.env.USERDOMAIN || 'LOCAL'
+      };
+      console.log('Using fallback authentication with user:', user);
+      return this.success(user);
+    }
+  });
+}
 
 // Debug: Check if strategy is registered
 console.log('Registered strategies:', Object.keys(nodesppi._strategies));
