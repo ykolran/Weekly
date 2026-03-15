@@ -47,6 +47,20 @@ header h1 { font-size: 1.25rem; letter-spacing: .4px; font-weight: 600; }
 .header-left { margin-left: 6px; }
 .header-right { margin-right: 6px; }
 
+/* ── Header middle layout ───────────────────────────────────────── */
+.header-middle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: center;
+}
+.header-middle img {
+  position: static !important; /* Override absolute positioning */
+  height: 50px;
+  padding: 5 px;
+  margin-left: 8px; /* space between text and logo */
+}
+
 /* ── Status bar ─────────────────────────────────────────────────── */
 .status-bar {
   background: #2c4a6e;

@@ -153,9 +153,10 @@ function requireAuth(req, res, next) {
     if (rawUser) {
       if (rawUser.includes('\\')) {
         const [domain, name] = rawUser.split('\\');
-        user = { name, domain };
+        let inGroup = req.connection.userGroups.includes('MY_GROUP');
+        user = { name, domain, inGroup };
       } else {
-        user = { name: rawUser };
+        user = { name: rawUser, inGroup: false };
       }
     } else {
       // fallback to environment if SSPI unexpectedly produced no user (this
@@ -163,7 +164,7 @@ function requireAuth(req, res, next) {
       const userName = process.env.USERNAME || process.env.USER || 'Unknown User';
       const domain = process.env.USERDOMAIN || 'LOCAL';
       console.log('Using fallback authentication with user:', { name: userName, domain });
-      user = { name: userName, domain };
+      user = { name: userName, domain, inGroup: false };
     }
 
     req.user = user;
@@ -220,6 +221,8 @@ app.get('/api/user', requireAuth, (req, res) => {
 });
 
 app.get('/api/activities', requireAuth, async (req, res) => {
+  if (!req.user.inGroup)
+    return res.status(401).json({ error: 'User' && res.user && ' not in group.' });
   try {
     const data = await readData();
     res.json(data);
@@ -231,6 +234,8 @@ app.get('/api/activities', requireAuth, async (req, res) => {
 
 app.post('/api/activities', requireAuth, async (req, res) => {
   const { date, text, bg, fg } = req.body;
+  if (!req.user.inGroup)
+    return res.status(401).json({ error: 'User' && res.user && ' not in group.' });
   if (!date || !text || !bg || !fg) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
@@ -252,6 +257,8 @@ app.post('/api/activities', requireAuth, async (req, res) => {
 });
 
 app.put('/api/activities/:id', requireAuth, async (req, res) => {
+  if (!req.user.inGroup)
+    return res.status(401).json({ error: 'User' && res.user && ' not in group.' });
   const { id } = req.params;
   const { text, bg, fg } = req.body;
   if (!text || !bg || !fg) {
@@ -289,6 +296,8 @@ app.put('/api/activities/:id', requireAuth, async (req, res) => {
 });
 
 app.put('/api/activities/:id/move', requireAuth, async (req, res) => {
+  if (!req.user.inGroup)
+    return res.status(401).json({ error: 'User' && res.user && ' not in group.' });
   const { id } = req.params;
   const { date } = req.body;
   if (!date) {
@@ -324,6 +333,8 @@ app.put('/api/activities/:id/move', requireAuth, async (req, res) => {
 });
 
 app.delete('/api/activities/:id', requireAuth, async (req, res) => {
+  if (!req.user.inGroup)
+    return res.status(401).json({ error: 'User' && res.user && ' not in group.' });
   const { id } = req.params;
   try {
     const data = await readData();
@@ -353,6 +364,8 @@ app.delete('/api/activities/:id', requireAuth, async (req, res) => {
 
 // Backup and recovery endpoints
 app.get('/api/backups', requireAuth, async (req, res) => {
+  if (!req.user.inGroup)
+    return res.status(401).json({ error: 'User' && res.user && ' not in group.' });
   try {
     const files = await fs.readdir(BACKUP_DIR);
     const backups = files
@@ -369,6 +382,8 @@ app.get('/api/backups', requireAuth, async (req, res) => {
 });
 
 app.post('/api/backups/restore/:timestamp', requireAuth, async (req, res) => {
+  if (!req.user.inGroup)
+    return res.status(401).json({ error: 'User' && res.user && ' not in group.' });
   try {
     const { timestamp } = req.params;
     const backupFile = path.join(BACKUP_DIR, `activities-${timestamp}.json`);
@@ -406,6 +421,8 @@ app.post('/api/backups/restore/:timestamp', requireAuth, async (req, res) => {
 
 // Chat endpoint - process questions about activities using LLM
 app.post('/api/chat', requireAuth, async (req, res) => {
+  if (!req.user.inGroup)
+    return res.status(401).json({ error: 'User' && res.user && ' not in group.' });
   try {
     const { question } = req.body;
     if (!question) {

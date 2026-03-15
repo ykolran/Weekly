@@ -97,7 +97,7 @@ async function loadUser() {
 async function loadData() {
   try {
     const response = await fetch('/api/activities');
-    if (!response.ok) throw new Error('Failed to fetch');
+    if (!response.ok) throw new Error(response.statusText);
     const resp = await response.json();
     // resp now holds { activities: {...}, changes: [...] }
     const newDataStr = JSON.stringify(resp.activities);
@@ -109,8 +109,11 @@ async function loadData() {
     // always update changes (server returns newest first)
     changes = resp.changes || [];
     renderChangeLog();
+    document.getElementById('statusText').textContent = 'Connected to server';
+    
   } catch (error) {
     console.error('Failed to load data from server', error);
+    document.getElementById('statusText').textContent = error;
   }
 }
 
@@ -516,9 +519,7 @@ async function init() {
 
   document.addEventListener('click', () => closeForm());
 
-  document.getElementById('statusText').textContent = 'Connected to server';
-
-  // Poll for updates every 5 seconds, but skip if user is editing
+   // Poll for updates every 5 seconds, but skip if user is editing
   setInterval(async () => {
     if (!isEditing) {
       await loadData();
