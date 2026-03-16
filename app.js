@@ -472,7 +472,17 @@ function addChatMessage(text, isUser) {
   const messagesDiv = document.getElementById('chatMessages');
   const msgDiv = document.createElement('div');
   msgDiv.className = `chat-message ${isUser ? 'user' : 'bot'}`;
-  msgDiv.innerHTML = `<div class="msg">${escapeHtml(text)}</div>`;
+
+  let content;
+  if (isUser) {
+    // user messages should remain plain text
+    content = escapeHtml(text);
+  } else {
+    // render markdown from the server
+    content = DOMPurify.sanitize(marked.parse(text));
+  }
+
+  msgDiv.innerHTML = `<div class="msg">${content}</div>`;
   messagesDiv.appendChild(msgDiv);
   messagesDiv.scrollTop = messagesDiv.scrollHeight;
 }

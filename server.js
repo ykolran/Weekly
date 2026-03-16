@@ -215,6 +215,28 @@ async function readData() {
   }
 }
 
+async function addActivityLLM(date, text) {
+  const data = await readData();
+
+  if (!data.activities[date]) data.activities[date] = [];
+
+  const id = Date.now().toString(36);
+
+  data.activities[date].push({
+    id,
+    text,
+    bg: "#4a90d9",
+    fg: "#fff"
+  });
+
+  data.changes.unshift({
+    date: new Date().toISOString().slice(0,10),
+    desc: `הפעילות "${text}" נוספה דרך הצ'אט`
+  });
+
+  await writeData(data);
+}
+
 // Routes
 app.get('/api/user', requireAuth, (req, res) => {
   res.json({ user: req.user });
@@ -349,7 +371,7 @@ app.delete('/api/activities/:id', requireAuth, async (req, res) => {
         // log deletion
         data.changes.unshift({
           date: new Date().toISOString().slice(0,10),
-          desc: `Deleted "${removed.text}"`
+          desc: `הפעילות "${removed.text}" נמחקה מ-${date}`
         });
         break;
       }
@@ -451,17 +473,45 @@ async function generateChatResponse(question, data, user) {
     const today = new Date().toISOString().slice(0, 10);
     const userName = user && user.name ? user.name : 'משתמש';
     
-    const prompt = `You are a helpful assistant for a weekly planner app. The user is ${userName}.
+  const prompt = `
+You are an assistant for a weekly planner.
 
-The user has activities scheduled as follows:
+You can either:
+1) Answer questions
+2) Perform actions on activities
 
-${activitiesSummary || 'No activities scheduled yet.'}
+If the user asks to ADD an activity, return JSON only:
 
-Today is ${today}.
+{
+  "action": "add",
+  "date": "YYYY-MM-DD",
+  "text": "activity description"
+}
 
-Please answer the user's question in Hebrew, being helpful and concise. If the question is about activities, use the information above. If it's a general question, provide a helpful response.
+If the user asks to MOVE an activity:
 
-User question: ${question}`;
+{
+  "action": "move",
+  "text": "activity description",
+  "date": "YYYY-MM-DD"
+}
+
+If the user asks to DELETE:
+
+{
+  "action": "delete",
+  "text": "activity description"
+}
+
+Otherwise respond normally in Hebrew.
+
+Current activities:
+${activitiesSummary}
+
+Today: ${today}
+
+User question: ${question}
+`;
 
     // Call Ollama API
     const response = await axios.post('http://localhost:1234/v1/chat/completions', {
@@ -472,7 +522,19 @@ User question: ${question}`;
       timeout: 100000 // 10 second timeout
     });
 
-    return response.data.choices[0].message.content.trim();
+    const llmReply = response.data.choices[0].message.content.trim();
+
+    try {
+      const cmd = JSON.parse(llmReply);
+
+      if (cmd.action === "add") {
+          await addActivityLLM(cmd.date, cmd.text);
+          return `הוספתי פעילות: "${cmd.text}" בתאריך ${cmd.date}`;
+      }
+
+    } catch {
+      return llmReply; // normal answer
+    }
   } catch (error) {
     console.error('LLM API error:', error.message);
     
