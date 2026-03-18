@@ -215,27 +215,31 @@ async function readData() {
   }
 }
 
-async function addActivityLLM(date, text) {
+async function addActivityLLM(date, text, bg, fg) {
   const data = await readData();
 
   if (!data.activities[date]) data.activities[date] = [];
 
   const id = Date.now().toString(36);
 
+  // reuse your normalization logic
+  const { bg: finalBg, fg: finalFg } = normalizeColorOrDefault(bg, fg);
+
   data.activities[date].push({
     id,
     text,
-    bg: "#4a90d9",
-    fg: "#fff"
+    bg: finalBg,
+    fg: finalFg
   });
 
   data.changes.unshift({
     date: new Date().toISOString().slice(0, 10),
-    desc: `הפעילות "${text}" נוספה דרך הצ'אט`
+    desc: `הפעילות \"${text}\" נוספה דרך הצ'אט`
   });
 
   await writeData(data);
 }
+
 
 async function moveActivityByTextAndDate(text, fromDate, toDate) {
   const data = await readData();
@@ -269,6 +273,101 @@ async function deleteActivityByTextAndDate(text, date) {
   return true;
 }
 
+function normalizeColorOrDefault(bg, fg) {
+  // very simple validation, you can tighten it
+  const defaultBg = "#4a90d9";
+  const defaultFg = "#ffffff";
+
+  const hexRe = /^#?[0-9a-fA-F]{6}$/;
+
+  let bgOut = bg && hexRe.test(bg) ? bg : defaultBg;
+  let fgOut = fg && hexRe.test(fg) ? fg : defaultFg;
+
+  if (!bgOut.startsWith('#')) bgOut = '#' + bgOut.replace('#', '');
+  if (!fgOut.startsWith('#')) fgOut = '#' + fgOut.replace('#', '');
+
+  return { bg: bgOut, fg: fgOut };
+}
+
+async function bulkColorByTextContains(query, bg, fg) {
+  const data = await readData();
+  const { bg: newBg, fg: newFg } = normalizeColorOrDefault(bg, fg);
+  let count = 0;
+
+  for (const [date, acts] of Object.entries(data.activities)) {
+    for (const act of acts) {
+      if (act.text && act.text.includes(query)) {
+        act.bg = newBg;
+        act.fg = newFg;
+        count++;
+      }
+    }
+  }
+
+  if (count > 0) {
+    data.changes.unshift({
+      date: new Date().toISOString().slice(0, 10),
+      desc: `שונו הצבעים של ${count} פעילויות המכילות את \"${query}\"`
+    });
+    await writeData(data);
+  }
+
+  return count;
+}
+
+async function bulkColorByDateRange(fromDate, toDate, bg, fg) {
+  const data = await readData();
+  const { bg: newBg, fg: newFg } = normalizeColorOrDefault(bg, fg);
+  let count = 0;
+
+  const from = new Date(fromDate);
+  const to = new Date(toDate);
+
+  for (const [date, acts] of Object.entries(data.activities)) {
+    const d = new Date(date);
+    if (d >= from && d <= to) {
+      for (const act of acts) {
+        act.bg = newBg;
+        act.fg = newFg;
+        count++;
+      }
+    }
+  }
+
+  if (count > 0) {
+    data.changes.unshift({
+      date: new Date().toISOString().slice(0, 10),
+      desc: `שונו הצבעים של ${count} פעילויות בין ${fromDate} ל-${toDate}`
+    });
+    await writeData(data);
+  }
+
+  return count;
+}
+
+async function bulkAddActivities(dates, text, bg, fg) {
+  const data = await readData();
+  const { bg: newBg, fg: newFg } = normalizeColorOrDefault(bg, fg);
+  let count = 0;
+
+  for (const date of dates) {
+    if (!isValidDateString(date)) continue;
+    if (!data.activities[date]) data.activities[date] = [];
+    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    data.activities[date].push({ id, text, bg: newBg, fg: newFg });
+    count++;
+  }
+
+  if (count > 0) {
+    data.changes.unshift({
+      date: new Date().toISOString().slice(0, 10),
+      desc: `נוספו ${count} פעילויות \"${text}\" בתאריכים מרובים דרך הצ'אט`
+    });
+    await writeData(data);
+  }
+
+  return count;
+}
 
 // Routes
 app.get('/api/user', requireAuth, (req, res) => {
@@ -547,40 +646,70 @@ You are an assistant for a weekly planner.
 
 There are two modes:
 
-1) COMMAND MODE – when the user clearly asks to add, move or delete an activity.
-   In this case you MUST respond with a single JSON object and NOTHING else.
-   Valid shapes:
+1) COMMAND MODE – when the user clearly asks to add, move, delete or change colors of activities.
+In this case you MUST respond with a single JSON object and NOTHING else.
+Valid shapes:
 
-   For ADD:
-   {
-     "action": "add",
-     "date": "YYYY-MM-DD",
-     "text": "activity description"
-   }
+For ADD:
+{
+  "action": "add",
+  "date": "YYYY-MM-DD",
+  "text": "activity description",
+  "bg": "#RRGGBB",        // optional, default blue
+  "fg": "#RRGGBB"         // optional, default white
+}
 
-   For MOVE:
-   {
-     "action": "move",
-     "text": "existing activity description",
-     "fromDate": "YYYY-MM-DD",
-     "toDate": "YYYY-MM-DD"
-   }
+For MOVE:
+{
+  "action": "move",
+  "text": "existing activity description",
+  "fromDate": "YYYY-MM-DD",
+  "toDate": "YYYY-MM-DD"
+}
 
-   For DELETE:
-   {
-     "action": "delete",
-     "text": "existing activity description",
-     "date": "YYYY-MM-DD"
-   }
+For DELETE:
+{
+  "action": "delete",
+  "text": "existing activity description",
+  "date": "YYYY-MM-DD"
+}
 
-   Rules:
-   - Never add explanation, code fences or extra text.
-   - Do not invent dates; if the user did not specify a date, infer it only if it’s unambiguous
-     (e.g., "היום", "מחר") and convert to YYYY-MM-DD. Otherwise, stay in CHAT MODE.
-   - Use exact text of the existing activity when moving/deleting if possible.
+For BULK COLOR CHANGE by substring:
+{
+  "action": "bulkColor",
+  "scope": "textContains",
+  "query": "substring to search in text",
+  "bg": "#RRGGBB",
+  "fg": "#RRGGBB"         // optional
+}
+
+For BULK COLOR CHANGE by date:
+{
+  "action": "bulkColor",
+  "scope": "dateRange",
+  "fromDate": "YYYY-MM-DD",
+  "toDate": "YYYY-MM-DD",
+  "bg": "#RRGGBB",
+  "fg": "#RRGGBB"         // optional
+}
+
+For BULK ADD (e.g. every day next week):
+{
+  "action": "bulkAdd",
+  "dates": ["YYYY-MM-DD", "YYYY-MM-DD", "..."],
+  "text": "activity description",
+  "bg": "#RRGGBB",        // optional
+  "fg": "#RRGGBB"         // optional
+}
+
+Rules:
+- Never add explanation, code fences or extra text.
+- Do not invent dates; if the user did not specify a date, infer it only if it’s unambiguous
+  (e.g., "היום", "מחר", "שבוע הבא") and convert to explicit dates list in BULK ADD.
+- Use exact text of the existing activity when moving/deleting if possible.
 
 2) CHAT MODE – for all other questions.
-   In this case answer naturally in Hebrew, without JSON.
+In this case answer naturally in Hebrew, without JSON.
 
 Current activities:
 ${activitiesSummary || '(אין פעילויות קיימות)'}
@@ -620,8 +749,8 @@ User: ${userName}
           if (!isValidDateString(cmd.date)) {
             return `תאריך לא תקין: ${cmd.date}`;
           }
-          await addActivityLLM(cmd.date, cmd.text);
-          return `הוספתי פעילות: "${cmd.text}" בתאריך ${cmd.date}`;
+          await addActivityLLM(cmd.date, cmd.text, cmd.bg, cmd.fg);
+          return `הוספתי פעילות: \"${cmd.text}\" בתאריך ${cmd.date}`;
         }
         case 'move': {
           const { text, fromDate, toDate } = cmd;
@@ -652,6 +781,54 @@ User: ${userName}
           }
           return `מחקתי את "${text}" מהתאריך ${date}.`;
         }
+        case 'bulkColor': {
+          const { scope } = cmd;
+          if (!scope) {
+            return 'לא הבנתי על אילו פעילויות לשנות צבע.';
+          }
+
+          if (scope === 'textContains') {
+            const { query, bg, fg } = cmd;
+            if (!query) {
+              return 'לא הבנתי לפי איזה טקסט לחפש את הפעילויות לצביעתן.';
+            }
+            const count = await bulkColorByTextContains(query, bg, fg);
+            if (!count) {
+              return `לא מצאתי פעילויות המכילות את \"${query}\".`;
+            }
+            return `שיניתי את הצבע של ${count} פעילויות המכילות את \"${query}\".`;
+          }
+
+          if (scope === 'dateRange') {
+            const { fromDate, toDate, bg, fg } = cmd;
+            if (!fromDate || !toDate) {
+              return 'לא הצלחתי להבין את טווח התאריכים לצביעת הפעילויות.';
+            }
+            if (!isValidDateString(fromDate) || !isValidDateString(toDate)) {
+              return 'אחד מתאריכי הטווח אינו תקין.';
+            }
+            const count = await bulkColorByDateRange(fromDate, toDate, bg, fg);
+            if (!count) {
+              return `לא מצאתי פעילויות בין ${fromDate} ל-${toDate}.`;
+            }
+            return `שיניתי את הצבע של ${count} פעילויות בין ${fromDate} ל-${toDate}.`;
+          }
+
+          return 'הבנת הצבעים לא הייתה ברורה. נסה לנסח מחדש.';
+        }
+        case 'bulkAdd': {
+          const { dates, text, bg, fg } = cmd;
+          if (!Array.isArray(dates) || !dates.length || !text) {
+            return 'לא הצלחתי להבין באילו תאריכים להוסיף את הפעילויות או מה הטקסט שלהן.';
+          }
+          const validDates = dates.filter(isValidDateString);
+          if (!validDates.length) {
+            return 'אף אחד מהתאריכים שסופקו לא תקין.';
+          }
+          const count = await bulkAddActivities(validDates, text, bg, fg);
+          return `הוספתי ${count} פעילויות \"${text}\" בתאריכים שביקשת.`;
+        }
+
         default:
           return llmReply; // unknown action → treat as normal answer
       }
