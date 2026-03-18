@@ -153,7 +153,7 @@ function requireAuth(req, res, next) {
     if (rawUser) {
       if (rawUser.includes('\\')) {
         const [domain, name] = rawUser.split('\\');
-        let inGroup = req.connection.userGroups.includes('MY_GROUP');
+        let inGroup = req.connection.userGroups.includes('BUILTIN\\Administrators');
         user = { name, domain, inGroup };
       } else {
         user = { name: rawUser, inGroup: false };
@@ -593,9 +593,14 @@ app.post('/api/chat', requireAuth, async (req, res) => {
 });
 
 function safeParseLLMJson(text) {
+  if (!text) return null;
+
+  // handle special openai/gpt-oss-20b wrapper
+  text = extractOssJsonPayload(text);
+
   let trimmed = text.trim();
 
-  // Strip ```json ... ``` if the model ever adds it
+  // Strip ```json ... ``` or ``` ... ```
   if (trimmed.startsWith('```')) {
     const firstNewline = trimmed.indexOf('\n');
     if (firstNewline !== -1) {
@@ -606,8 +611,66 @@ function safeParseLLMJson(text) {
     trimmed = trimmed.trim();
   }
 
-  return JSON.parse(trimmed);
+  // 1) Try single JSON object/array directly
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed;
+  } catch {
+    // fall through
+  }
+
+  // 2) Try to parse as concatenated JSON objects: {...}{...}{...}
+  const objs = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escape = false;
+
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+
+    if (inString) {
+      if (escape) {
+        escape = false;
+      } else if (ch === '\\') {
+        escape = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      if (depth === 0 && start === -1) start = i === 0 ? 0 : i - 0;
+      continue;
+    }
+
+    if (ch === '{' || ch === '[') {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (ch === '}' || ch === ']') {
+      depth--;
+      if (depth === 0 && start !== -1) {
+        const chunk = trimmed.slice(start, i + 1);
+        try {
+          const parsed = JSON.parse(chunk);
+          objs.push(parsed);
+        } catch {
+          // ignore this chunk
+        }
+        start = -1;
+      }
+    }
+  }
+
+  if (objs.length === 1) return objs[0];
+  if (objs.length > 1) return objs;
+
+  // nothing worked
+  return null;
 }
+
 
 function isValidDateString(date) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return false;
@@ -632,6 +695,33 @@ function buildActivitiesSummary(activities, today, windowDays = 60) {
   return entries.join('\n');
 }
 
+function extractOssJsonPayload(raw) {
+  if (!raw) return raw;
+  let text = raw.trim();
+
+  // Find the OSS wrapper marker
+  const marker = '<|message|>';
+  const idx = text.indexOf(marker);
+  if (idx !== -1) {
+    text = text.slice(idx + marker.length).trim();
+  }
+
+  // At this point text is something like: {\"action\":\"add\",...}
+  // It may itself be JSON-encoded as a string (outer quotes)
+  if (
+    (text.startsWith('"') && text.endsWith('"')) ||
+    (text.startsWith("'") && text.endsWith("'"))
+  ) {
+    try {
+      text = JSON.parse(text); // unescape \" → "
+    } catch {
+      // ignore, fall through with original text
+    }
+  }
+
+  return text.trim();
+}
+
 
 // Helper function to generate chat responses using Ollama LLM
 async function generateChatResponse(question, data, user) {
@@ -647,7 +737,7 @@ You are an assistant for a weekly planner.
 There are two modes:
 
 1) COMMAND MODE – when the user clearly asks to add, move, delete or change colors of activities.
-In this case you MUST respond with a single JSON object and NOTHING else.
+In this case you MUST respond with a single or multiple JSON objects and NOTHING else.
 Valid shapes:
 
 For ADD:
@@ -705,7 +795,7 @@ For BULK ADD (e.g. every day next week):
 Rules:
 - Never add explanation, code fences or extra text.
 - Do not invent dates; if the user did not specify a date, infer it only if it’s unambiguous
-  (e.g., "היום", "מחר", "שבוע הבא") and convert to explicit dates list in BULK ADD.
+  (e.g., "היום", "מחר", "שבוע הבא") and convert to explicit dates list either in BULK ADD or in multiple JSON objects.
 - Use exact text of the existing activity when moving/deleting if possible.
 
 2) CHAT MODE – for all other questions.
@@ -722,119 +812,153 @@ User: ${userName}
     const response = await axios.post(
       'http://localhost:1234/v1/chat/completions',
       {
-        model: 'mistral',
+        model: 'openai/gpt-oss-20b',
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: question }
         ],
         stream: false
       },
-      { timeout: 10000 } // 10 seconds is enough for local
+      { timeout: 100000 } // 100 seconds is enough for local
     );
 
     const llmReply = response.data.choices[0].message.content.trim();
 
     try {
-      const cmd = safeParseLLMJson(llmReply);
+      const parsed = safeParseLLMJson(llmReply);
 
-      if (!cmd || typeof cmd !== 'object' || !cmd.action) {
-        return llmReply; // not a command – normal answer
+      if (!parsed) {
+        return llmReply; // no usable JSON – normal answer
       }
 
-      switch (cmd.action) {
-        case 'add': {
-          if (!cmd.date || !cmd.text) {
-            return 'לא הצלחתי להבין את התאריך או התיאור לפעילות החדשה.';
-          }
-          if (!isValidDateString(cmd.date)) {
-            return `תאריך לא תקין: ${cmd.date}`;
-          }
-          await addActivityLLM(cmd.date, cmd.text, cmd.bg, cmd.fg);
-          return `הוספתי פעילות: \"${cmd.text}\" בתאריך ${cmd.date}`;
-        }
-        case 'move': {
-          const { text, fromDate, toDate } = cmd;
-          if (!text || !fromDate || !toDate) {
-            return 'לא הצלחתי להבין מה להזיז ולאיזה תאריך.';
-          }
-          if (!isValidDateString(fromDate) || !isValidDateString(toDate)) {
-            return 'אחד מהתאריכים שנתת אינו תקין.';
-          }
-          // implement moveByTextAndDate(data, text, fromDate, toDate)
-          const moved = await moveActivityByTextAndDate(text, fromDate, toDate);
-          if (!moved) {
-            return `לא מצאתי פעילות בשם "${text}" בתאריך ${fromDate}.`;
-          }
-          return `העברתי את "${text}" מ-${fromDate} ל-${toDate}.`;
-        }
-        case 'delete': {
-          const { text, date } = cmd;
-          if (!text || !date) {
-            return 'לא הצלחתי להבין מה למחוק ומאיזה תאריך.';
-          }
-          if (!isValidDateString(date)) {
-            return `תאריך לא תקין: ${date}`;
-          }
-          const deleted = await deleteActivityByTextAndDate(text, date);
-          if (!deleted) {
-            return `לא מצאתי פעילות בשם "${text}" בתאריך ${date}.`;
-          }
-          return `מחקתי את "${text}" מהתאריך ${date}.`;
-        }
-        case 'bulkColor': {
-          const { scope } = cmd;
-          if (!scope) {
-            return 'לא הבנתי על אילו פעילויות לשנות צבע.';
-          }
+      const commands = Array.isArray(parsed) ? parsed : [parsed];
 
-          if (scope === 'textContains') {
-            const { query, bg, fg } = cmd;
-            if (!query) {
-              return 'לא הבנתי לפי איזה טקסט לחפש את הפעילויות לצביעתן.';
-            }
-            const count = await bulkColorByTextContains(query, bg, fg);
-            if (!count) {
-              return `לא מצאתי פעילויות המכילות את \"${query}\".`;
-            }
-            return `שיניתי את הצבע של ${count} פעילויות המכילות את \"${query}\".`;
-          }
+      // For now: execute commands sequentially and build a summary message.
+      const results = [];
 
-          if (scope === 'dateRange') {
-            const { fromDate, toDate, bg, fg } = cmd;
-            if (!fromDate || !toDate) {
-              return 'לא הצלחתי להבין את טווח התאריכים לצביעת הפעילויות.';
+      for (const cmd of commands) {
+        if (!cmd || typeof cmd !== 'object' || !cmd.action) {
+          continue;
+        }
+
+        switch (cmd.action) {
+          case 'add': {
+            if (!cmd.date || !cmd.text) {
+              results.push('לא הצלחתי להבין את התאריך או התיאור לפעילות החדשה.');
+              break;
+            }
+            if (!isValidDateString(cmd.date)) {
+              results.push(`תאריך לא תקין: ${cmd.date}`);
+              break;
+            }
+            await addActivityLLM(cmd.date, cmd.text, cmd.bg, cmd.fg);
+            results.push(`הוספתי פעילות: \"${cmd.text}\" בתאריך ${cmd.date}.`);
+            break;
+          }
+          case 'move': {
+            const { text, fromDate, toDate } = cmd;
+            if (!text || !fromDate || !toDate) {
+              results.push('לא הצלחתי להבין מה להזיז ולאיזה תאריך.');
+              break;
             }
             if (!isValidDateString(fromDate) || !isValidDateString(toDate)) {
-              return 'אחד מתאריכי הטווח אינו תקין.';
+              results.push('אחד מהתאריכים שנתת אינו תקין.');
+              break;
             }
-            const count = await bulkColorByDateRange(fromDate, toDate, bg, fg);
-            if (!count) {
-              return `לא מצאתי פעילויות בין ${fromDate} ל-${toDate}.`;
+            const moved = await moveActivityByTextAndDate(text, fromDate, toDate);
+            if (!moved) {
+              results.push(`לא מצאתי פעילות בשם \"${text}\" בתאריך ${fromDate}.`);
+            } else {
+              results.push(`העברתי את \"${text}\" מ-${fromDate} ל-${toDate}.`);
             }
-            return `שיניתי את הצבע של ${count} פעילויות בין ${fromDate} ל-${toDate}.`;
+            break;
           }
-
-          return 'הבנת הצבעים לא הייתה ברורה. נסה לנסח מחדש.';
+          case 'delete': {
+            const { text, date } = cmd;
+            if (!text || !date) {
+              results.push('לא הצלחתי להבין מה למחוק ומאיזה תאריך.');
+              break;
+            }
+            if (!isValidDateString(date)) {
+              results.push(`תאריך לא תקין: ${date}`);
+              break;
+            }
+            const deleted = await deleteActivityByTextAndDate(text, date);
+            if (!deleted) {
+              results.push(`לא מצאתי פעילות בשם \"${text}\" בתאריך ${date}.`);
+            } else {
+              results.push(`מחקתי את \"${text}\" מהתאריך ${date}.`);
+            }
+            break;
+          }
+          case 'bulkColor': {
+            const { scope } = cmd;
+            if (!scope) {
+              results.push('לא הבנתי על אילו פעילויות לשנות צבע.');
+              break;
+            }
+            if (scope === 'textContains') {
+              const { query, bg, fg } = cmd;
+              if (!query) {
+                results.push('לא הבנתי לפי איזה טקסט לחפש את הפעילויות לצביעתן.');
+                break;
+              }
+              const count = await bulkColorByTextContains(query, bg, fg);
+              results.push(
+                count
+                  ? `שיניתי את הצבע של ${count} פעילויות המכילות את \"${query}\".`
+                  : `לא מצאתי פעילויות המכילות את \"${query}\".`
+              );
+            } else if (scope === 'dateRange') {
+              const { fromDate, toDate, bg, fg } = cmd;
+              if (!fromDate || !toDate) {
+                results.push('לא הצלחתי להבין את טווח התאריכים לצביעת הפעילויות.');
+                break;
+              }
+              if (!isValidDateString(fromDate) || !isValidDateString(toDate)) {
+                results.push('אחד מתאריכי הטווח אינו תקין.');
+                break;
+              }
+              const count = await bulkColorByDateRange(fromDate, toDate, bg, fg);
+              results.push(
+                count
+                  ? `שיניתי את הצבע של ${count} פעילויות בין ${fromDate} ל-${toDate}.`
+                  : `לא מצאתי פעילויות בין ${fromDate} ל-${toDate}.`
+              );
+            }
+            break;
+          }
+          case 'bulkAdd': {
+            const { dates, text, bg, fg } = cmd;
+            if (!Array.isArray(dates) || !dates.length || !text) {
+              results.push('לא הצלחתי להבין באילו תאריכים להוסיף את הפעילויות או מה הטקסט שלהן.');
+              break;
+            }
+            const validDates = dates.filter(isValidDateString);
+            if (!validDates.length) {
+              results.push('אף אחד מהתאריכים שסופקו לא תקין.');
+              break;
+            }
+            const count = await bulkAddActivities(validDates, text, bg, fg);
+            results.push(`הוספתי ${count} פעילויות \"${text}\" בתאריכים שביקשת.`);
+            break;
+          }
+          default:
+            // ignore unknown actions; fall back to natural answer if no valid commands were processed
+            break;
         }
-        case 'bulkAdd': {
-          const { dates, text, bg, fg } = cmd;
-          if (!Array.isArray(dates) || !dates.length || !text) {
-            return 'לא הצלחתי להבין באילו תאריכים להוסיף את הפעילויות או מה הטקסט שלהן.';
-          }
-          const validDates = dates.filter(isValidDateString);
-          if (!validDates.length) {
-            return 'אף אחד מהתאריכים שסופקו לא תקין.';
-          }
-          const count = await bulkAddActivities(validDates, text, bg, fg);
-          return `הוספתי ${count} פעילויות \"${text}\" בתאריכים שביקשת.`;
-        }
-
-        default:
-          return llmReply; // unknown action → treat as normal answer
       }
+
+      if (!results.length) {
+        return llmReply; // nothing actionable parsed
+      }
+
+      // Join multiple command results with line breaks
+      return results.join('\n');
     } catch {
-      return llmReply; // normal chat answer
+      return llmReply; // parsing failed → treat as normal answer
     }
+
 
   } catch (error) {
     console.error('LLM API error:', error.stack || error.message);

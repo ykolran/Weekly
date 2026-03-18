@@ -4,7 +4,7 @@
   "description": "A shared weekly planner app with server-side data storage",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
+    "start": "node server.js 2>&1",
     "dev": "node server.js"
   },
   "dependencies": {

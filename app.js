@@ -518,6 +518,7 @@ async function sendChatMessage() {
     addChatMessage(result.answer, false);
   } catch (error) {
     addChatMessage('סליחה, לא יכלתי לעבד את השאלה. נסה שוב.', false);
+    addChatMessage(error, false);
     console.error('Chat error:', error);
   }
 }
