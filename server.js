@@ -273,6 +273,33 @@ async function deleteActivityByTextAndDate(text, date) {
   return true;
 }
 
+async function changeActivityByTextAndDate(date, fromText, toText, bg, fg) {
+  const data = await readData();
+  const acts = data.activities[date] || [];
+  const act = acts.find(a => a.text === fromText);
+  if (!act) return false;
+  const prevText = act.text;
+  let changed = false;
+  if (toText && toText !== fromText) {
+    changed = true;
+    act.text = toText;
+  }
+  if (bg || fg) {
+    const { bg: finalBg, fg: finalFg } = normalizeColorOrDefault(bg, fg);
+    act.bg = finalBg;
+    act.fg = finalFg;
+    changed = true;
+  }
+  if (!changed) return false; // no actual change
+
+  data.changes.unshift({
+    date: new Date().toISOString().slice(0, 10),
+    desc: `הפעילות "${prevText}" שונתה דרך הצ'אט`
+  });
+  await writeData(data);
+  return true;
+}
+
 function normalizeColorOrDefault(bg, fg) {
   // very simple validation, you can tighten it
   const defaultBg = "#4a90d9";
@@ -287,86 +314,6 @@ function normalizeColorOrDefault(bg, fg) {
   if (!fgOut.startsWith('#')) fgOut = '#' + fgOut.replace('#', '');
 
   return { bg: bgOut, fg: fgOut };
-}
-
-async function bulkColorByTextContains(query, bg, fg) {
-  const data = await readData();
-  const { bg: newBg, fg: newFg } = normalizeColorOrDefault(bg, fg);
-  let count = 0;
-
-  for (const [date, acts] of Object.entries(data.activities)) {
-    for (const act of acts) {
-      if (act.text && act.text.includes(query)) {
-        act.bg = newBg;
-        act.fg = newFg;
-        count++;
-      }
-    }
-  }
-
-  if (count > 0) {
-    data.changes.unshift({
-      date: new Date().toISOString().slice(0, 10),
-      desc: `שונו הצבעים של ${count} פעילויות המכילות את \"${query}\"`
-    });
-    await writeData(data);
-  }
-
-  return count;
-}
-
-async function bulkColorByDateRange(fromDate, toDate, bg, fg) {
-  const data = await readData();
-  const { bg: newBg, fg: newFg } = normalizeColorOrDefault(bg, fg);
-  let count = 0;
-
-  const from = new Date(fromDate);
-  const to = new Date(toDate);
-
-  for (const [date, acts] of Object.entries(data.activities)) {
-    const d = new Date(date);
-    if (d >= from && d <= to) {
-      for (const act of acts) {
-        act.bg = newBg;
-        act.fg = newFg;
-        count++;
-      }
-    }
-  }
-
-  if (count > 0) {
-    data.changes.unshift({
-      date: new Date().toISOString().slice(0, 10),
-      desc: `שונו הצבעים של ${count} פעילויות בין ${fromDate} ל-${toDate}`
-    });
-    await writeData(data);
-  }
-
-  return count;
-}
-
-async function bulkAddActivities(dates, text, bg, fg) {
-  const data = await readData();
-  const { bg: newBg, fg: newFg } = normalizeColorOrDefault(bg, fg);
-  let count = 0;
-
-  for (const date of dates) {
-    if (!isValidDateString(date)) continue;
-    if (!data.activities[date]) data.activities[date] = [];
-    const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
-    data.activities[date].push({ id, text, bg: newBg, fg: newFg });
-    count++;
-  }
-
-  if (count > 0) {
-    data.changes.unshift({
-      date: new Date().toISOString().slice(0, 10),
-      desc: `נוספו ${count} פעילויות \"${text}\" בתאריכים מרובים דרך הצ'אט`
-    });
-    await writeData(data);
-  }
-
-  return count;
 }
 
 // Routes
@@ -680,19 +627,30 @@ function isValidDateString(date) {
 
 function buildActivitiesSummary(activities, today, windowDays = 60) {
   const todayDate = new Date(today);
-  const entries = [];
+  const lines = [];
 
   for (const [date, acts] of Object.entries(activities)) {
     const d = new Date(date);
     const diffDays = Math.abs((d - todayDate) / (1000 * 60 * 60 * 24));
-    if (diffDays <= windowDays) {
-      entries.push(`${date}: ${acts.map(a => a.text).join(', ')}`);
+    if (diffDays > windowDays) continue;
+
+    for (const act of acts) {
+      // one line per activity
+      lines.push(`${date} | ${act.text}`);
     }
   }
 
-  if (entries.length === 0) return '';
-  entries.sort(); // chronological
-  return entries.join('\n');
+  if (!lines.length) return '';
+
+  // sort chronologically by date, then by text for stability
+  lines.sort((a, b) => {
+    const [dateA, textA] = a.split(' | ');
+    const [dateB, textB] = b.split(' | ');
+    if (dateA === dateB) return textA.localeCompare(textB, 'he');
+    return dateA.localeCompare(dateB);
+  });
+
+  return lines.join('\n');
 }
 
 function extractOssJsonPayload(raw) {
@@ -727,17 +685,52 @@ function extractOssJsonPayload(raw) {
 async function generateChatResponse(question, data, user) {
   try {
     // Prepare context about activities   
-    const today = new Date().toISOString().slice(0, 10);
-    const activitiesSummary = buildActivitiesSummary(data.activities, today, 60);
+    // Assuming you want server local time; for a specific TZ use timeZone option
+    const now = new Date();
+
+    // ISO date
+    const todayIso = now.toISOString().slice(0, 10);
+
+    // Localized date/time strings (Hebrew + Israel TZ example)
+    const locale = 'he-IL';
+    const tz = 'Asia/Jerusalem';
+
+    const localDate = now.toLocaleDateString(locale, {
+      weekday: 'long',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      timeZone: tz
+    });
+
+    const localTime = now.toLocaleTimeString(locale, {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      timeZone: tz
+    });
+
+    // Just the weekday name, if you want it separately
+    const weekdayName = now.toLocaleDateString(locale, {
+      weekday: 'long',
+      timeZone: tz
+    });
+    const activitiesSummary = buildActivitiesSummary(data.activities, todayIso, 60);
     const userName = user && user.name ? user.name : 'משתמש';
 
     const systemPrompt = `
 You are an assistant for a weekly planner.
 
+Current time context (do not override):
+- ISO date (for keys): ${todayIso}
+- Local date: ${localDate}
+- Local time: ${localTime}
+- Local weekday: ${weekdayName}
+
 There are two modes:
 
-1) COMMAND MODE – when the user clearly asks to add, move, delete or change colors of activities.
-In this case you MUST respond with a single or multiple JSON objects and NOTHING else.
+1) COMMAND MODE – when the user clearly asks to add, move, delete or change activities.
+In this case you MUST respond with a list of JSON objects and NOTHING else.
 Valid shapes:
 
 For ADD:
@@ -764,39 +757,20 @@ For DELETE:
   "date": "YYYY-MM-DD"
 }
 
-For BULK COLOR CHANGE by substring:
+For CHANGE:
 {
-  "action": "bulkColor",
-  "scope": "textContains",
-  "query": "substring to search in text",
-  "bg": "#RRGGBB",
-  "fg": "#RRGGBB"         // optional
-}
-
-For BULK COLOR CHANGE by date:
-{
-  "action": "bulkColor",
-  "scope": "dateRange",
-  "fromDate": "YYYY-MM-DD",
-  "toDate": "YYYY-MM-DD",
-  "bg": "#RRGGBB",
-  "fg": "#RRGGBB"         // optional
-}
-
-For BULK ADD (e.g. every day next week):
-{
-  "action": "bulkAdd",
-  "dates": ["YYYY-MM-DD", "YYYY-MM-DD", "..."],
-  "text": "activity description",
-  "bg": "#RRGGBB",        // optional
-  "fg": "#RRGGBB"         // optional
+  "action": "change",
+  "date": "YYYY-MM-DD",
+  "fromText": "existing activity description",
+  "toText": "new activity description",
+  "bg": "#RRGGBB",        // optional, default blue
+  "fg": "#RRGGBB"         // optional, default white
 }
 
 Rules:
 - Never add explanation, code fences or extra text.
-- Do not invent dates; if the user did not specify a date, infer it only if it’s unambiguous
-  (e.g., "היום", "מחר", "שבוע הבא") and convert to explicit dates list either in BULK ADD or in multiple JSON objects.
-- Use exact text of the existing activity when moving/deleting if possible.
+- Do not invent dates; if the user did not specify a date, infer it only if it’s unambiguous.
+- Use exact text of the existing activity when moving/deleting/changing if possible.
 
 2) CHAT MODE – for all other questions.
 In this case answer naturally in Hebrew, without JSON.
@@ -804,7 +778,7 @@ In this case answer naturally in Hebrew, without JSON.
 Current activities:
 ${activitiesSummary || '(אין פעילויות קיימות)'}
 
-Today: ${today}
+Today (ISO key): ${todayIso}
 User: ${userName}
 `;
 
@@ -891,58 +865,25 @@ User: ${userName}
             }
             break;
           }
-          case 'bulkColor': {
-            const { scope } = cmd;
-            if (!scope) {
-              results.push('לא הבנתי על אילו פעילויות לשנות צבע.');
+          case 'change': {
+            const { date, fromText, toText, bg, fg } = cmd;
+            if (!fromText || !date) {
+              results.push('לא הצלחתי להבין מה למחוק ומאיזה תאריך.');
               break;
             }
-            if (scope === 'textContains') {
-              const { query, bg, fg } = cmd;
-              if (!query) {
-                results.push('לא הבנתי לפי איזה טקסט לחפש את הפעילויות לצביעתן.');
-                break;
-              }
-              const count = await bulkColorByTextContains(query, bg, fg);
-              results.push(
-                count
-                  ? `שיניתי את הצבע של ${count} פעילויות המכילות את \"${query}\".`
-                  : `לא מצאתי פעילויות המכילות את \"${query}\".`
-              );
-            } else if (scope === 'dateRange') {
-              const { fromDate, toDate, bg, fg } = cmd;
-              if (!fromDate || !toDate) {
-                results.push('לא הצלחתי להבין את טווח התאריכים לצביעת הפעילויות.');
-                break;
-              }
-              if (!isValidDateString(fromDate) || !isValidDateString(toDate)) {
-                results.push('אחד מתאריכי הטווח אינו תקין.');
-                break;
-              }
-              const count = await bulkColorByDateRange(fromDate, toDate, bg, fg);
-              results.push(
-                count
-                  ? `שיניתי את הצבע של ${count} פעילויות בין ${fromDate} ל-${toDate}.`
-                  : `לא מצאתי פעילויות בין ${fromDate} ל-${toDate}.`
-              );
+            if (!isValidDateString(date)) {
+              results.push(`תאריך לא תקין: ${date}`);
+              break;
+            }
+            const changed = await changeActivityByTextAndDate(date, fromText, toText, bg, fg);
+            if (!changed) {
+              results.push(`לא הצלחתי לשנות את הפעילות בשם \"${fromText}\" בתאריך ${date}.`);
+            } else {
+              results.push(`שניתי את \"${fromText}\".`);
             }
             break;
           }
-          case 'bulkAdd': {
-            const { dates, text, bg, fg } = cmd;
-            if (!Array.isArray(dates) || !dates.length || !text) {
-              results.push('לא הצלחתי להבין באילו תאריכים להוסיף את הפעילויות או מה הטקסט שלהן.');
-              break;
-            }
-            const validDates = dates.filter(isValidDateString);
-            if (!validDates.length) {
-              results.push('אף אחד מהתאריכים שסופקו לא תקין.');
-              break;
-            }
-            const count = await bulkAddActivities(validDates, text, bg, fg);
-            results.push(`הוספתי ${count} פעילויות \"${text}\" בתאריכים שביקשת.`);
-            break;
-          }
+
           default:
             // ignore unknown actions; fall back to natural answer if no valid commands were processed
             break;

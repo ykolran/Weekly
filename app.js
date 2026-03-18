@@ -575,7 +575,7 @@ async function init() {
   // Show welcome message on init since chat is always open
   if (!chatWelcomeShown && user) {
     const userName = user.name || 'משתמש';
-    addChatMessage(`שלום ${userName}! אני כאן לעזור לך עם התכנון השבועי שלך. שאל אותי כל שאלה על הפעילויות שלך.`, false);
+    addChatMessage(`שלום ${userName}! אני כאן לעזור לך עם התכנון השבועי שלך.`, false);
     chatWelcomeShown = true;
   }
 }
